@@ -953,7 +953,8 @@ public class PhoneSwitcher extends Handler {
     }
 
     protected int phoneIdForRequest(NetworkRequest netRequest) {
-        int subId = getSubIdFromNetworkRequest(netRequest);
+        int subId = getSubIdFromNetworkSpecifier(netRequest.networkCapabilities
+                .getNetworkSpecifier());
 
         if (subId == DEFAULT_SUBSCRIPTION_ID) return mPreferredDataPhoneId;
         if (subId == INVALID_SUBSCRIPTION_ID) return INVALID_PHONE_INDEX;
