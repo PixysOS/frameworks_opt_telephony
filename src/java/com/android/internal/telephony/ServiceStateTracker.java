@@ -96,6 +96,7 @@ import com.android.internal.telephony.data.AccessNetworksManager;
 import com.android.internal.telephony.data.DataNetwork;
 import com.android.internal.telephony.data.DataNetworkController.DataNetworkControllerCallback;
 import com.android.internal.telephony.dataconnection.DataConnection;
+import com.android.internal.telephony.imsphone.ImsPhone;
 import com.android.internal.telephony.metrics.ServiceStateStats;
 import com.android.internal.telephony.metrics.TelephonyMetrics;
 import com.android.internal.telephony.uicc.IccCardApplicationStatus.AppState;
@@ -285,7 +286,6 @@ public class ServiceStateTracker extends Handler {
     // Timeout event used when delaying radio power off to wait for IMS deregistration to happen.
     private static final int EVENT_POWER_OFF_RADIO_IMS_DEREG_TIMEOUT   = 62;
     protected static final int EVENT_RESET_LAST_KNOWN_CELL_IDENTITY    = 63;
-    private static final int EVENT_REGISTER_DATA_NETWORK_EXISTING_CHANGED = 64;
     // Telecom has un/registered a PhoneAccount that provides OTT voice calling capability, e.g.
     // wi-fi calling.
     protected static final int EVENT_TELECOM_VOICE_SERVICE_STATE_OVERRIDE_CHANGED = 65;
@@ -620,11 +620,11 @@ public class ServiceStateTracker extends Handler {
     private int mLastKnownAreaCode = CellInfo.UNAVAILABLE;
 
     /**
-     * Indicating if there is any data network existing. This is used in airplane mode turning on
-     * scenario, where service state tracker should wait all data disconnected before powering
-     * down the modem.
+     * Data network controller callback for all data disconnected. This is used when turning on
+     * airplane mode, where service state tracker should wait for all data disconnected on all
+     * subscriptions before powering down the modem.
      */
-    private boolean mAnyDataExisting = false;
+    private DataNetworkControllerCallback mDataDisconnectedCallback;
 
     public ServiceStateTracker(GsmCdmaPhone phone, CommandsInterface ci) {
         mNitzState = TelephonyComponentFactory.getInstance()
@@ -722,7 +722,15 @@ public class ServiceStateTracker extends Handler {
                 CarrierServiceStateTracker.CARRIER_EVENT_IMS_CAPABILITIES_CHANGED, null);
 
         if (mPhone.isUsingNewDataStack()) {
-            sendEmptyMessage(EVENT_REGISTER_DATA_NETWORK_EXISTING_CHANGED);
+            mDataDisconnectedCallback = new DataNetworkControllerCallback(this::post) {
+                @Override
+                public void onAnyDataNetworkExistingChanged(boolean anyDataExisting) {
+                    log("onAnyDataNetworkExistingChanged: anyDataExisting=" + anyDataExisting);
+                    if (!anyDataExisting) {
+                        sendEmptyMessage(EVENT_ALL_DATA_DISCONNECTED);
+                    }
+                }
+            };
         }
     }
 
@@ -898,7 +906,7 @@ public class ServiceStateTracker extends Handler {
         if (nrs != null) {
             int rat = ServiceState.networkTypeToRilRadioTechnology(
                     nrs.getAccessNetworkTechnology());
-            int drs = regCodeToServiceState(nrs.getRegistrationState());
+            int drs = regCodeToServiceState(nrs.getInitialRegistrationState());
             return new Pair<>(drs, rat);
         }
         return null;
@@ -1110,7 +1118,7 @@ public class ServiceStateTracker extends Handler {
         if (power && !mRadioPowerOffReasons.isEmpty()) {
             log("setRadioPowerForReason " + "power: " + power + " forEmergencyCall= "
                     + forEmergencyCall + " isSelectedPhoneForEmergencyCall: "
-                    + isSelectedPhoneForEmergencyCall + " forceApply " + forceApply + "reason:"
+                    + isSelectedPhoneForEmergencyCall + " forceApply " + forceApply + " reason: "
                     + reason + " will not power on the radio as it is powered off for the "
                     + "following reasons: " + mRadioPowerOffReasons + ".");
             return;
@@ -1471,30 +1479,26 @@ public class ServiceStateTracker extends Handler {
                 }
                 break;
 
-            case EVENT_REGISTER_DATA_NETWORK_EXISTING_CHANGED: {
-                mPhone.getDataNetworkController().registerDataNetworkControllerCallback(
-                        new DataNetworkControllerCallback(this::post) {
-                        @Override
-                        public void onAnyDataNetworkExistingChanged(boolean anyDataExisting) {
-                            if (mAnyDataExisting != anyDataExisting) {
-                                mAnyDataExisting = anyDataExisting;
-                                log("onAnyDataNetworkExistingChanged: anyDataExisting="
-                                        + anyDataExisting);
-                                if (!mAnyDataExisting) {
-                                    sendEmptyMessage(EVENT_ALL_DATA_DISCONNECTED);
-                                }
-                            }
-                        }
-                        });
-                break;
-            }
             case EVENT_ALL_DATA_DISCONNECTED:
                 if (mPhone.isUsingNewDataStack()) {
                     log("EVENT_ALL_DATA_DISCONNECTED");
-                    if (mPendingRadioPowerOffAfterDataOff) {
+                    if (!mPendingRadioPowerOffAfterDataOff) return;
+                    boolean areAllDataDisconnectedOnAllPhones = true;
+                    for (Phone phone : PhoneFactory.getPhones()) {
+                        if (phone.getDataNetworkController().areAllDataDisconnected()) {
+                            phone.getDataNetworkController()
+                                    .unregisterDataNetworkControllerCallback(
+                                            mDataDisconnectedCallback);
+                        } else {
+                            log("Still waiting for all data disconnected on phone: "
+                                    + phone.getSubId());
+                            areAllDataDisconnectedOnAllPhones = false;
+                        }
+                    }
+                    if (areAllDataDisconnectedOnAllPhones) {
                         mPendingRadioPowerOffAfterDataOff = false;
                         removeMessages(EVENT_SET_RADIO_POWER_OFF);
-                        if (DBG) log("EVENT_ALL_DATA_DISCONNECTED, turn radio off now.");
+                        if (DBG) log("Data disconnected for all phones, turn radio off now.");
                         hangupAndPowerOff();
                     }
                     return;
@@ -1698,6 +1702,10 @@ public class ServiceStateTracker extends Handler {
                         TelephonyMetrics.getInstance().writeServiceStateChanged(
                                 mPhone.getPhoneId(), mSS);
                         mPhone.getVoiceCallSessionStats().onServiceStateChanged(mSS);
+                        ImsPhone imsPhone = (ImsPhone) mPhone.getImsPhone();
+                        if (imsPhone != null) {
+                            imsPhone.getImsStats().onServiceStateChanged(mSS);
+                        }
                         mServiceStateStats.onServiceStateChanged(mSS);
                     }
                 }
@@ -1938,7 +1946,7 @@ public class ServiceStateTracker extends Handler {
         if (ar.userObj != mPollingContext) return;
 
         if (ar.exception != null) {
-            CommandException.Error err=null;
+            CommandException.Error err = null;
 
             if (ar.exception instanceof IllegalStateException) {
                 log("handlePollStateResult exception " + ar.exception);
@@ -1948,15 +1956,22 @@ public class ServiceStateTracker extends Handler {
                 err = ((CommandException)(ar.exception)).getCommandError();
             }
 
+            if (mCi.getRadioState() != TelephonyManager.RADIO_POWER_ON) {
+                log("handlePollStateResult: Invalid response due to radio off or unavailable. "
+                        + "Set ServiceState to out of service.");
+                pollStateInternal(false);
+                return;
+            }
+
             if (err == CommandException.Error.RADIO_NOT_AVAILABLE) {
-                // Radio has crashed or turned off
+                loge("handlePollStateResult: RIL returned RADIO_NOT_AVAILABLE when radio is on.");
                 cancelPollState();
                 return;
             }
 
             if (err != CommandException.Error.OP_NOT_ALLOWED_BEFORE_REG_NW) {
-                loge("RIL implementation has returned an error where it must succeed" +
-                        ar.exception);
+                loge("handlePollStateResult: RIL returned an error where it must succeed: "
+                        + ar.exception);
             }
         } else try {
             handlePollStateResultMessage(what, ar);
@@ -2098,29 +2113,12 @@ public class ServiceStateTracker extends Handler {
         int newFrequencyRange = ServiceState.FREQUENCY_RANGE_UNKNOWN;
         if (physicalChannelConfigs != null) {
             for (PhysicalChannelConfig config : physicalChannelConfigs) {
-                if (isNrPhysicalChannelConfig(config)) {
-                    // Update the frequency range of the NR parameters if there is an internet data
-                    // connection associate to this NR physical channel channel config.
-                    int[] contextIds = config.getContextIds();
-                    for (int cid : contextIds) {
-                        if (mPhone.isUsingNewDataStack()) {
-                            if (mPhone.getDataNetworkController().isInternetNetwork(cid)) {
-                                newFrequencyRange = ServiceState.getBetterNRFrequencyRange(
-                                        newFrequencyRange, config.getFrequencyRange());
-                                break;
-                            }
-                        } else {
-                            DataConnection dc = mPhone.getDcTracker(
-                                    AccessNetworkConstants.TRANSPORT_TYPE_WWAN)
-                                    .getDataConnectionByContextId(cid);
-                            if (dc != null && dc.getNetworkCapabilities().hasCapability(
-                                    NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
-                                newFrequencyRange = ServiceState.getBetterNRFrequencyRange(
-                                        newFrequencyRange, config.getFrequencyRange());
-                                break;
-                            }
-                        }
-                    }
+                if (isNrPhysicalChannelConfig(config) && isInternetPhysicalChannelConfig(config)) {
+                    // Update the NR frequency range if there is an internet data connection
+                    // associated with this NR physical channel channel config.
+                    newFrequencyRange = ServiceState.getBetterNRFrequencyRange(
+                            newFrequencyRange, config.getFrequencyRange());
+                    break;
                 }
             }
         }
@@ -2138,7 +2136,8 @@ public class ServiceStateTracker extends Handler {
 
         boolean hasNrSecondaryServingCell = false;
         for (PhysicalChannelConfig config : configs) {
-            if (isNrPhysicalChannelConfig(config) && config.getConnectionStatus()
+            if (isNrPhysicalChannelConfig(config) && isInternetPhysicalChannelConfig(config)
+                    && config.getConnectionStatus()
                     == PhysicalChannelConfig.CONNECTION_SECONDARY_SERVING) {
                 hasNrSecondaryServingCell = true;
                 break;
@@ -2146,7 +2145,7 @@ public class ServiceStateTracker extends Handler {
         }
 
         int oldNrState = regInfo.getNrState();
-        int newNrState = oldNrState;
+        int newNrState;
         if (hasNrSecondaryServingCell) {
             newNrState = NetworkRegistrationInfo.NR_STATE_CONNECTED;
         } else {
@@ -2162,6 +2161,25 @@ public class ServiceStateTracker extends Handler {
 
     private boolean isNrPhysicalChannelConfig(PhysicalChannelConfig config) {
         return config.getNetworkType() == TelephonyManager.NETWORK_TYPE_NR;
+    }
+
+    private boolean isInternetPhysicalChannelConfig(PhysicalChannelConfig config) {
+        for (int cid : config.getContextIds()) {
+            if (mPhone.isUsingNewDataStack()) {
+                if (mPhone.getDataNetworkController().isInternetNetwork(cid)) {
+                    return true;
+                }
+            } else {
+                DataConnection dc = mPhone.getDcTracker(
+                        AccessNetworkConstants.TRANSPORT_TYPE_WWAN)
+                        .getDataConnectionByContextId(cid);
+                if (dc != null && dc.getNetworkCapabilities().hasCapability(
+                        NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -2185,14 +2203,14 @@ public class ServiceStateTracker extends Handler {
         if (wlanPsRegState != null
                 && wlanPsRegState.getAccessNetworkTechnology()
                 == TelephonyManager.NETWORK_TYPE_IWLAN
-                && wlanPsRegState.getRegistrationState()
+                && wlanPsRegState.getInitialRegistrationState()
                 == NetworkRegistrationInfo.REGISTRATION_STATE_HOME
                 && isIwlanPreferred) {
             serviceState.setDataRegState(ServiceState.STATE_IN_SERVICE);
         } else if (wwanPsRegState != null) {
             // If the device is not camped on IWLAN, then we use cellular PS registration state
             // to compute reg state and rat.
-            int regState = wwanPsRegState.getRegistrationState();
+            int regState = wwanPsRegState.getInitialRegistrationState();
             serviceState.setDataRegState(regCodeToServiceState(regState));
         }
         if (DBG) {
@@ -2208,7 +2226,7 @@ public class ServiceStateTracker extends Handler {
                 VoiceSpecificRegistrationInfo voiceSpecificStates =
                         networkRegState.getVoiceSpecificInfo();
 
-                int registrationState = networkRegState.getRegistrationState();
+                int registrationState = networkRegState.getInitialRegistrationState();
                 int cssIndicator = voiceSpecificStates.cssSupported ? 1 : 0;
                 int newVoiceRat = ServiceState.networkTypeToRilRadioTechnology(
                         networkRegState.getAccessNetworkTechnology());
@@ -2290,7 +2308,7 @@ public class ServiceStateTracker extends Handler {
                 mNewSS.addNetworkRegistrationInfo(networkRegState);
                 DataSpecificRegistrationInfo dataSpecificStates =
                         networkRegState.getDataSpecificInfo();
-                int registrationState = networkRegState.getRegistrationState();
+                int registrationState = networkRegState.getInitialRegistrationState();
                 int serviceState = regCodeToServiceState(registrationState);
                 int newDataRat = ServiceState.networkTypeToRilRadioTechnology(
                         networkRegState.getAccessNetworkTechnology());
@@ -2827,6 +2845,7 @@ public class ServiceStateTracker extends Handler {
         String wfcFlightSpnFormat = null;
         int combinedRegState = getCombinedRegState(mSS);
         if (mPhone.getImsPhone() != null && mPhone.getImsPhone().isWifiCallingEnabled()
+                && mPhone.isImsRegistered()
                 && (combinedRegState == ServiceState.STATE_IN_SERVICE
                 && mSS.getDataNetworkType() == TelephonyManager.NETWORK_TYPE_IWLAN)) {
             // In Wi-Fi Calling mode (connected to WiFi and WFC enabled),
@@ -3325,10 +3344,9 @@ public class ServiceStateTracker extends Handler {
 
     private void pollStateInternal(boolean modemTriggered) {
         mPollingContext = new int[1];
-        mPollingContext[0] = 0;
         NetworkRegistrationInfo nri;
 
-        log("pollState: modemTriggered=" + modemTriggered);
+        log("pollState: modemTriggered=" + modemTriggered + ", radioState=" + mCi.getRadioState());
 
         switch (mCi.getRadioState()) {
             case TelephonyManager.RADIO_POWER_UNAVAILABLE:
@@ -3362,8 +3380,8 @@ public class ServiceStateTracker extends Handler {
                 mPhone.getSignalStrengthController().setSignalStrengthDefaultValues();
                 mLastNitzData = null;
                 mNitzState.handleNetworkUnavailable();
-                // don't poll when device is shutting down or the poll was not modemTrigged
-                // (they sent us new radio data) and current network is not IWLAN
+                // Don't poll when device is shutting down or the poll was not modemTriggered
+                // (they sent us new radio data) and the current network is not IWLAN
                 if (mDeviceShuttingDown ||
                         (!modemTriggered && ServiceState.RIL_RADIO_TECHNOLOGY_IWLAN
                         != mSS.getRilDataRadioTechnology())) {
@@ -3530,9 +3548,9 @@ public class ServiceStateTracker extends Handler {
                 anyDataRatChanged = true;
             }
 
-            int oldRegState = oldNrs != null ? oldNrs.getRegistrationState()
+            int oldRegState = oldNrs != null ? oldNrs.getInitialRegistrationState()
                     : NetworkRegistrationInfo.REGISTRATION_STATE_UNKNOWN;
-            int newRegState = newNrs != null ? newNrs.getRegistrationState()
+            int newRegState = newNrs != null ? newNrs.getInitialRegistrationState()
                     : NetworkRegistrationInfo.REGISTRATION_STATE_UNKNOWN;
             hasDataRegStateChanged.put(transport, oldRegState != newRegState);
             if (oldRegState != newRegState) {
@@ -3766,8 +3784,10 @@ public class ServiceStateTracker extends Handler {
             // incomplete.
             // CellIdentity can return a null MCC and MNC in CDMA
             String localeOperator = operatorNumeric;
-            if (isInvalidOperatorNumeric(operatorNumeric)
-                    || mSS.getDataNetworkType() == TelephonyManager.NETWORK_TYPE_IWLAN) {
+            if (mSS.getDataNetworkType() == TelephonyManager.NETWORK_TYPE_IWLAN) {
+                localeOperator = null;
+            }
+            if (isInvalidOperatorNumeric(localeOperator)) {
                 for (CellIdentity cid : prioritizedCids) {
                     if (!TextUtils.isEmpty(cid.getPlmn())) {
                         localeOperator = cid.getPlmn();
@@ -3808,6 +3828,10 @@ public class ServiceStateTracker extends Handler {
 
             TelephonyMetrics.getInstance().writeServiceStateChanged(mPhone.getPhoneId(), mSS);
             mPhone.getVoiceCallSessionStats().onServiceStateChanged(mSS);
+            ImsPhone imsPhone = (ImsPhone) mPhone.getImsPhone();
+            if (imsPhone != null) {
+                imsPhone.getImsStats().onServiceStateChanged(mSS);
+            }
             mServiceStateStats.onServiceStateChanged(mSS);
         }
 
@@ -4012,28 +4036,6 @@ public class ServiceStateTracker extends Handler {
         }
 
         return carrierName;
-    }
-
-    /**
-     * Get the service provider name. If it is not available, get plmn or pnn
-     * if configured. Otherwise return CARD1/CARD2
-     * @return service provider name.
-     */
-    public String getServiceProviderNameOrPlmn() {
-        String spnOrPlmn = getServiceProviderName();
-        if (!TextUtils.isEmpty(spnOrPlmn)) {
-            return spnOrPlmn;
-        }
-        spnOrPlmn = mSS.getOperatorAlpha();
-        PersistableBundle config = getCarrierConfig();
-        if (mIccRecords != null && config.getBoolean(
-                CarrierConfigManager.KEY_WFC_CARRIER_NAME_OVERRIDE_BY_PNN_BOOL)) {
-            spnOrPlmn = mIccRecords.getPnnHomeName();
-        }
-        if (!TextUtils.isEmpty(spnOrPlmn)) {
-            return spnOrPlmn;
-        }
-        return "CARD" + Integer.toString(mPhone.getPhoneId() + 1);
     }
 
     /**
@@ -4266,7 +4268,7 @@ public class ServiceStateTracker extends Handler {
     }
 
     /**
-     * Do not set roaming state in case of oprators considered non-roaming.
+     * Do not set roaming state in case of operators considered non-roaming.
      *
      * Can use mcc or mcc+mnc as item of
      * {@link CarrierConfigManager#KEY_NON_ROAMING_OPERATOR_STRING_ARRAY}.
@@ -5023,17 +5025,34 @@ public class ServiceStateTracker extends Handler {
         synchronized (this) {
             if (!mPendingRadioPowerOffAfterDataOff) {
                 if (mPhone.isUsingNewDataStack()) {
-                    if (mAnyDataExisting) {
-                        log("powerOffRadioSafely: Tear down all data networks.");
-                        mPhone.getDataNetworkController().tearDownAllDataNetworks(
-                                DataNetwork.TEAR_DOWN_REASON_AIRPLANE_MODE_ON);
+                    // hang up all active voice calls first
+                    if (mPhone.isPhoneTypeGsm() && mPhone.isInCall()) {
+                        mPhone.mCT.mRingingCall.hangupIfAlive();
+                        mPhone.mCT.mBackgroundCall.hangupIfAlive();
+                        mPhone.mCT.mForegroundCall.hangupIfAlive();
+                    }
+
+                    for (Phone phone : PhoneFactory.getPhones()) {
+                        if (!phone.getDataNetworkController().areAllDataDisconnected()) {
+                            log("powerOffRadioSafely: Data is active on phone " + phone.getSubId()
+                                    + ". Wait for all data disconnect.");
+                            mPendingRadioPowerOffAfterDataOff = true;
+                            phone.getDataNetworkController().registerDataNetworkControllerCallback(
+                                    mDataDisconnectedCallback);
+                        }
+                    }
+
+                    // Tear down outside of the disconnected check to prevent race conditions.
+                    mPhone.getDataNetworkController().tearDownAllDataNetworks(
+                            DataNetwork.TEAR_DOWN_REASON_AIRPLANE_MODE_ON);
+
+                    if (mPendingRadioPowerOffAfterDataOff) {
                         sendEmptyMessageDelayed(EVENT_SET_RADIO_POWER_OFF,
                                 POWER_OFF_ALL_DATA_NETWORKS_DISCONNECTED_TIMEOUT);
                     } else {
-                        log("powerOffRadioSafely: No data is connected.");
-                        sendEmptyMessage(EVENT_ALL_DATA_DISCONNECTED);
+                        log("powerOffRadioSafely: No data is connected, turn off radio now.");
+                        hangupAndPowerOff();
                     }
-                    mPendingRadioPowerOffAfterDataOff = true;
                     return;
                 }
                 int dds = SubscriptionManager.getDefaultDataSubscriptionId();
@@ -5085,8 +5104,8 @@ public class ServiceStateTracker extends Handler {
                     msg.arg1 = ++mPendingRadioPowerOffAfterDataOffTag;
                     if (sendMessageDelayed(msg, 30000)) {
                         if (DBG) {
-                            log("powerOffRadioSafely: Wait up to 30s for data to isconnect, then"
-                                    + " turn off radio.");
+                            log("powerOffRadioSafely: Wait up to 30s for data to disconnect, "
+                                    + "then turn off radio.");
                         }
                         mPendingRadioPowerOffAfterDataOff = true;
                     } else {
@@ -5350,7 +5369,6 @@ public class ServiceStateTracker extends Handler {
         dumpCellInfoList(pw);
         pw.flush();
         pw.println(" mAllowedNetworkTypes=" + mAllowedNetworkTypes);
-        pw.println(" mAnyDataExisting=" + mAnyDataExisting);
         pw.println(" mMaxDataCalls=" + mMaxDataCalls);
         pw.println(" mNewMaxDataCalls=" + mNewMaxDataCalls);
         pw.println(" mReasonDataDenied=" + mReasonDataDenied);
@@ -5483,6 +5501,13 @@ public class ServiceStateTracker extends Handler {
         final String homeMCC = homeNumeric.substring(0, 3);
         final String networkCountry = MccTable.countryCodeForMcc(networkMCC);
         final String homeCountry = MccTable.countryCodeForMcc(homeMCC);
+
+        if (mLocaleTracker != null && !TextUtils.isEmpty(mLocaleTracker.getCountryOverride())) {
+            log("inSameCountry:  countryOverride var set.  This should only be set for testing "
+                    + "purposes to override the device location.");
+            return mLocaleTracker.getCountryOverride().equals(homeCountry);
+        }
+
         if (networkCountry.isEmpty() || homeCountry.isEmpty()) {
             // Not a valid country
             return false;
@@ -5678,7 +5703,7 @@ public class ServiceStateTracker extends Handler {
                 NetworkRegistrationInfo wlanNri = new NetworkRegistrationInfo.Builder()
                         .setTransportType(AccessNetworkConstants.TRANSPORT_TYPE_WLAN)
                         .setDomain(NetworkRegistrationInfo.DOMAIN_PS)
-                        .setRegistrationState(wwanNri.getRegistrationState())
+                        .setRegistrationState(wwanNri.getInitialRegistrationState())
                         .setAccessNetworkTechnology(TelephonyManager.NETWORK_TYPE_IWLAN)
                         .setRejectCause(wwanNri.getRejectCause())
                         .setEmergencyOnly(wwanNri.isEmergencyEnabled())

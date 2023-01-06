@@ -16,6 +16,8 @@
 
 package com.android.internal.telephony;
 
+import static android.telephony.TelephonyManager.UNKNOWN_CARRIER_ID;
+
 import static com.android.internal.telephony.RILConstants.RIL_UNSOL_CDMA_PRL_CHANGED;
 import static com.android.internal.telephony.RILConstants.RIL_UNSOL_CELL_INFO_LIST;
 import static com.android.internal.telephony.RILConstants.RIL_UNSOL_LCEDATA_RECV;
@@ -73,7 +75,7 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
         mRil.processIndication(RIL.NETWORK_SERVICE, indicationType);
 
         if (cellIdentity == null || barringInfos == null) {
-            AnomalyReporter.reportAnomaly(UUID.fromString("645b16bb-c930-4c1c-9c5d-568696542e05"),
+            reportAnomaly(UUID.fromString("645b16bb-c930-4c1c-9c5d-568696542e05"),
                     "Invalid barringInfoChanged indication");
             mRil.riljLoge("Invalid barringInfoChanged indication");
             return;
@@ -95,7 +97,7 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
 
         int[] response = new int[]{version};
 
-        if (RIL.RILJ_LOGD) mRil.unsljLogRet(RIL_UNSOL_CDMA_PRL_CHANGED, response);
+        if (mRil.isLogOrTrace()) mRil.unsljLogRet(RIL_UNSOL_CDMA_PRL_CHANGED, response);
 
         mRil.mCdmaPrlChangedRegistrants.notifyRegistrants(new AsyncResult(null, response, null));
     }
@@ -109,7 +111,7 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
             android.hardware.radio.network.CellInfo[] records) {
         mRil.processIndication(RIL.NETWORK_SERVICE, indicationType);
         ArrayList<CellInfo> response = RILUtils.convertHalCellInfoList(records);
-        if (RIL.RILJ_LOGD) mRil.unsljLogRet(RIL_UNSOL_CELL_INFO_LIST, response);
+        if (mRil.isLogOrTrace()) mRil.unsljLogRet(RIL_UNSOL_CELL_INFO_LIST, response);
         mRil.mRilCellInfoListRegistrants.notifyRegistrants(new AsyncResult(null, response, null));
     }
 
@@ -124,7 +126,7 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
 
         List<LinkCapacityEstimate> response = RILUtils.convertHalLceData(lce);
 
-        if (RIL.RILJ_LOGD) mRil.unsljLogRet(RIL_UNSOL_LCEDATA_RECV, response);
+        if (mRil.isLogOrTrace()) mRil.unsljLogRet(RIL_UNSOL_LCEDATA_RECV, response);
 
         if (mRil.mLceInfoRegistrants != null) {
             mRil.mLceInfoRegistrants.notifyRegistrants(new AsyncResult(null, response, null));
@@ -140,36 +142,43 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
             android.hardware.radio.network.PhysicalChannelConfig[] configs) {
         mRil.processIndication(RIL.NETWORK_SERVICE, indicationType);
         List<PhysicalChannelConfig> response = new ArrayList<>(configs.length);
-        for (android.hardware.radio.network.PhysicalChannelConfig config : configs) {
-            PhysicalChannelConfig.Builder builder = new PhysicalChannelConfig.Builder();
-            switch (config.band.getTag()) {
-                case android.hardware.radio.network.PhysicalChannelConfigBand.geranBand:
-                    builder.setBand(config.band.getGeranBand());
-                    break;
-                case android.hardware.radio.network.PhysicalChannelConfigBand.utranBand:
-                    builder.setBand(config.band.getUtranBand());
-                    break;
-                case android.hardware.radio.network.PhysicalChannelConfigBand.eutranBand:
-                    builder.setBand(config.band.getEutranBand());
-                    break;
-                case android.hardware.radio.network.PhysicalChannelConfigBand.ngranBand:
-                    builder.setBand(config.band.getNgranBand());
-                    break;
-                default:
-                    mRil.riljLoge("Unsupported band type " + config.band.getTag());
+        try {
+            for (android.hardware.radio.network.PhysicalChannelConfig config : configs) {
+                PhysicalChannelConfig.Builder builder = new PhysicalChannelConfig.Builder();
+                switch (config.band.getTag()) {
+                    case android.hardware.radio.network.PhysicalChannelConfigBand.geranBand:
+                        builder.setBand(config.band.getGeranBand());
+                        break;
+                    case android.hardware.radio.network.PhysicalChannelConfigBand.utranBand:
+                        builder.setBand(config.band.getUtranBand());
+                        break;
+                    case android.hardware.radio.network.PhysicalChannelConfigBand.eutranBand:
+                        builder.setBand(config.band.getEutranBand());
+                        break;
+                    case android.hardware.radio.network.PhysicalChannelConfigBand.ngranBand:
+                        builder.setBand(config.band.getNgranBand());
+                        break;
+                    default:
+                        mRil.riljLoge("Unsupported band type " + config.band.getTag());
+                }
+                response.add(builder.setCellConnectionStatus(
+                        RILUtils.convertHalCellConnectionStatus(config.status))
+                        .setDownlinkChannelNumber(config.downlinkChannelNumber)
+                        .setUplinkChannelNumber(config.uplinkChannelNumber)
+                        .setCellBandwidthDownlinkKhz(config.cellBandwidthDownlinkKhz)
+                        .setCellBandwidthUplinkKhz(config.cellBandwidthUplinkKhz)
+                        .setNetworkType(ServiceState.rilRadioTechnologyToNetworkType(config.rat))
+                        .setPhysicalCellId(config.physicalCellId)
+                        .setContextIds(config.contextIds)
+                        .build());
             }
-            response.add(builder.setCellConnectionStatus(
-                    RILUtils.convertHalCellConnectionStatus(config.status))
-                    .setDownlinkChannelNumber(config.downlinkChannelNumber)
-                    .setUplinkChannelNumber(config.uplinkChannelNumber)
-                    .setCellBandwidthDownlinkKhz(config.cellBandwidthDownlinkKhz)
-                    .setCellBandwidthUplinkKhz(config.cellBandwidthUplinkKhz)
-                    .setNetworkType(ServiceState.rilRadioTechnologyToNetworkType(config.rat))
-                    .setPhysicalCellId(config.physicalCellId)
-                    .setContextIds(config.contextIds)
-                    .build());
+        } catch (IllegalArgumentException iae) {
+            reportAnomaly(UUID.fromString("918f0970-9aa9-4bcd-a28e-e49a83fe77d5"),
+                    "RIL reported invalid PCC (AIDL)");
+            mRil.riljLoge("Invalid PhysicalChannelConfig " + iae);
+            return;
         }
-        if (RIL.RILJ_LOGD) mRil.unsljLogRet(RIL_UNSOL_PHYSICAL_CHANNEL_CONFIG, response);
+        if (mRil.isLogOrTrace()) mRil.unsljLogRet(RIL_UNSOL_PHYSICAL_CHANNEL_CONFIG, response);
 
         mRil.mPhysicalChannelConfigurationRegistrants.notifyRegistrants(
                 new AsyncResult(null, response, null));
@@ -188,7 +197,7 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
 
         SignalStrength ss = mRil.fixupSignalStrength10(ssInitial);
         // Note this is set to "verbose" because it happens frequently
-        if (RIL.RILJ_LOGV) mRil.unsljLogvRet(RIL_UNSOL_SIGNAL_STRENGTH, ss);
+        if (mRil.isLogvOrTrace()) mRil.unsljLogvRet(RIL_UNSOL_SIGNAL_STRENGTH, ss);
 
         if (mRil.mSignalStrengthRegistrant != null) {
             mRil.mSignalStrengthRegistrant.notifyRegistrant(new AsyncResult(null, ss, null));
@@ -202,7 +211,7 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
     public void imsNetworkStateChanged(int indicationType) {
         mRil.processIndication(RIL.NETWORK_SERVICE, indicationType);
 
-        if (RIL.RILJ_LOGD) mRil.unsljLog(RIL_UNSOL_RESPONSE_IMS_NETWORK_STATE_CHANGED);
+        if (mRil.isLogOrTrace()) mRil.unsljLog(RIL_UNSOL_RESPONSE_IMS_NETWORK_STATE_CHANGED);
 
         mRil.mImsNetworkStateChangedRegistrants.notifyRegistrants();
     }
@@ -218,7 +227,7 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
 
         ArrayList<CellInfo> cellInfos = RILUtils.convertHalCellInfoList(result.networkInfos);
         NetworkScanResult nsr = new NetworkScanResult(result.status, result.error, cellInfos);
-        if (RIL.RILJ_LOGD) mRil.unsljLogRet(RIL_UNSOL_NETWORK_SCAN_RESULT, nsr);
+        if (mRil.isLogOrTrace()) mRil.unsljLogRet(RIL_UNSOL_NETWORK_SCAN_RESULT, nsr);
         mRil.mRilNetworkScanResultRegistrants.notifyRegistrants(new AsyncResult(null, nsr, null));
     }
 
@@ -229,7 +238,7 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
     public void networkStateChanged(int indicationType) {
         mRil.processIndication(RIL.NETWORK_SERVICE, indicationType);
 
-        if (RIL.RILJ_LOGD) mRil.unsljLog(RIL_UNSOL_RESPONSE_NETWORK_STATE_CHANGED);
+        if (mRil.isLogOrTrace()) mRil.unsljLog(RIL_UNSOL_RESPONSE_NETWORK_STATE_CHANGED);
 
         mRil.mNetworkStateRegistrants.notifyRegistrants();
     }
@@ -249,15 +258,15 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
         @ElapsedRealtimeLong long receivedTimeMs, long ageMs) {
         mRil.processIndication(RIL.NETWORK_SERVICE, indicationType);
 
-        if (RIL.RILJ_LOGD) mRil.unsljLogRet(RIL_UNSOL_NITZ_TIME_RECEIVED, nitzTime);
+        if (mRil.isLogOrTrace()) mRil.unsljLogRet(RIL_UNSOL_NITZ_TIME_RECEIVED, nitzTime);
 
-        // Ignore the NITZ if ageMs is not a valid time, e.g. negative or greater than
-        // receivedTimeMs.
-        if ((ageMs < 0) || (ageMs >= receivedTimeMs)) {
-            AnomalyReporter.reportAnomaly(UUID.fromString("fc7c56d4-485d-475a-aaff-394203c6cdfc"),
-                    "NITZ indication with invalid age");
+        // Ignore the NITZ if receivedTimeMs or ageMs is not a valid time.
+        // e.g. receivedTimeMs is non-positive, ageMs is negative or greater than receivedTimeMs.
+        if ((receivedTimeMs <= 0) || (ageMs < 0) || (ageMs >= receivedTimeMs)) {
+            reportAnomaly(UUID.fromString("fc7c56d4-485d-475a-aaff-394203c6cdfc"),
+                    "NITZ indication with invalid parameter");
 
-            mRil.riljLoge("age time is invalid, ignoring nitzTimeReceived indication. "
+            mRil.riljLoge("NITZ parameter is invalid, ignoring nitzTimeReceived indication. "
                 + "receivedTimeMs = " + receivedTimeMs + ", ageMs = " + ageMs);
             return;
         }
@@ -271,7 +280,7 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
         boolean ignoreNitz = TelephonyProperties.ignore_nitz().orElse(false);
 
         if (ignoreNitz) {
-            if (RIL.RILJ_LOGD) mRil.riljLog("ignoring UNSOL_NITZ_TIME_RECEIVED");
+            if (mRil.isLogOrTrace()) mRil.riljLog("ignoring UNSOL_NITZ_TIME_RECEIVED");
         } else {
             if (mRil.mNITZTimeRegistrant != null) {
                 mRil.mNITZTimeRegistrant.notifyRegistrant(new AsyncResult(null, result, null));
@@ -301,7 +310,7 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
                 || (domain & ~NetworkRegistrationInfo.DOMAIN_CS_PS) != 0
                 || causeCode < 0 || additionalCauseCode < 0
                 || (causeCode == Integer.MAX_VALUE && additionalCauseCode == Integer.MAX_VALUE)) {
-            AnomalyReporter.reportAnomaly(UUID.fromString("f16e5703-6105-4341-9eb3-e68189156eb4"),
+            reportAnomaly(UUID.fromString("f16e5703-6105-4341-9eb3-e68189156eb4"),
                     "Invalid registrationFailed indication");
 
             mRil.riljLoge("Invalid registrationFailed indication");
@@ -321,7 +330,7 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
     public void restrictedStateChanged(int indicationType, int state) {
         mRil.processIndication(RIL.NETWORK_SERVICE, indicationType);
 
-        if (RIL.RILJ_LOGD) mRil.unsljLogvRet(RIL_UNSOL_RESTRICTED_STATE_CHANGED, state);
+        if (mRil.isLogOrTrace()) mRil.unsljLogvRet(RIL_UNSOL_RESTRICTED_STATE_CHANGED, state);
 
         if (mRil.mRestrictedStateRegistrant != null) {
             mRil.mRestrictedStateRegistrant.notifyRegistrant(new AsyncResult(null, state, null));
@@ -344,7 +353,9 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
         notification.type = suppSvcNotification.type;
         notification.number = suppSvcNotification.number;
 
-        if (RIL.RILJ_LOGD) mRil.unsljLogRet(RIL_UNSOL_SUPP_SVC_NOTIFICATION, notification);
+        if (mRil.isLogOrTrace()) {
+            mRil.unsljLogRet(RIL_UNSOL_SUPP_SVC_NOTIFICATION, notification);
+        }
 
         if (mRil.mSsnRegistrant != null) {
             mRil.mSsnRegistrant.notifyRegistrant(new AsyncResult(null, notification, null));
@@ -361,9 +372,27 @@ public class NetworkIndication extends IRadioNetworkIndication.Stub {
 
         int[] response = new int[] {rat};
 
-        if (RIL.RILJ_LOGD) mRil.unsljLogRet(RIL_UNSOL_VOICE_RADIO_TECH_CHANGED, response);
+        if (mRil.isLogOrTrace()) {
+            mRil.unsljLogRet(RIL_UNSOL_VOICE_RADIO_TECH_CHANGED, response);
+        }
 
         mRil.mVoiceRadioTechChangedRegistrants.notifyRegistrants(
                 new AsyncResult(null, response, null));
+    }
+
+    @Override
+    public String getInterfaceHash() {
+        return IRadioNetworkIndication.HASH;
+    }
+
+    @Override
+    public int getInterfaceVersion() {
+        return IRadioNetworkIndication.VERSION;
+    }
+
+    private void reportAnomaly(UUID uuid, String msg) {
+        Phone phone = mRil.mPhoneId == null ? null : PhoneFactory.getPhone(mRil.mPhoneId);
+        int carrierId = phone == null ? UNKNOWN_CARRIER_ID : phone.getCarrierId();
+        AnomalyReporter.reportAnomaly(uuid, msg, carrierId);
     }
 }

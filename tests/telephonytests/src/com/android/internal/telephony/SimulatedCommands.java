@@ -2067,11 +2067,27 @@ public class SimulatedCommands extends BaseCommands
 
     @Override
     public void setInitialAttachApn(DataProfile dataProfile, boolean isRoaming, Message result) {
+        SimulatedCommandsVerifier.getInstance().setInitialAttachApn(dataProfile, isRoaming, result);
+        resultSuccess(result, null);
     }
 
     @Override
     public void setDataProfile(DataProfile[] dps, boolean isRoaming, Message result) {
+        SimulatedCommandsVerifier.getInstance().setDataProfile(dps, isRoaming, result);
+        resultSuccess(result, null);
     }
+
+    @Override
+    public void startHandover(Message result, int callId) {
+        SimulatedCommandsVerifier.getInstance().startHandover(result, callId);
+        resultSuccess(result, null);
+    };
+
+    @Override
+    public void cancelHandover(Message result, int callId) {
+        SimulatedCommandsVerifier.getInstance().cancelHandover(result, callId);
+        resultSuccess(result, null);
+    };
 
     public void setImsRegistrationState(int[] regState) {
         mImsRegState = regState;
@@ -2337,12 +2353,26 @@ public class SimulatedCommands extends BaseCommands
 
     @Override
     public void registerForPcoData(Handler h, int what, Object obj) {
+        SimulatedCommandsVerifier.getInstance().registerForPcoData(h, what, obj);
         mPcoDataRegistrants.addUnique(h, what, obj);
     }
 
     @Override
     public void unregisterForPcoData(Handler h) {
+        SimulatedCommandsVerifier.getInstance().unregisterForPcoData(h);
         mPcoDataRegistrants.remove(h);
+    }
+
+    @Override
+    public void registerForNotAvailable(Handler h, int what, Object obj) {
+        SimulatedCommandsVerifier.getInstance().registerForNotAvailable(h, what, obj);
+        super.registerForNotAvailable(h, what, obj);
+    }
+
+    @Override
+    public void unregisterForNotAvailable(Handler h) {
+        SimulatedCommandsVerifier.getInstance().unregisterForNotAvailable(h);
+        super.unregisterForNotAvailable(h);
     }
 
     @Override
@@ -2364,8 +2394,11 @@ public class SimulatedCommands extends BaseCommands
     }
 
     @Override
-    public void setSignalStrengthReportingCriteria(SignalThresholdInfo signalThresholdInfo,
-            int ran, Message result) {
+    public void setSignalStrengthReportingCriteria(List<SignalThresholdInfo> signalThresholdInfos,
+            Message result) {
+        SimulatedCommandsVerifier.getInstance().setSignalStrengthReportingCriteria(
+                signalThresholdInfos, result);
+        resultSuccess(result, null);
     }
 
     @Override

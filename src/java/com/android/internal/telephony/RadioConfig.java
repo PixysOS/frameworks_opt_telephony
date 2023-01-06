@@ -36,6 +36,7 @@ import android.os.Message;
 import android.os.Registrant;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.Trace;
 import android.os.WorkSource;
 import android.telephony.TelephonyManager;
 import android.telephony.UiccSlotMapping;
@@ -44,7 +45,6 @@ import android.util.SparseArray;
 import com.android.telephony.Rlog;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.concurrent.atomic.AtomicLong;
@@ -273,6 +273,7 @@ public class RadioConfig extends Handler {
 
             if (mMockModem != null) {
                 mMockModem = null;
+                resetProxyAndRequestList("EVENT_AIDL_SERVICE_DEAD", null);
             }
         }
 
@@ -341,6 +342,9 @@ public class RadioConfig extends Handler {
 
     private RILRequest obtainRequest(int request, Message result, WorkSource workSource) {
         RILRequest rr = RILRequest.obtain(request, result, workSource);
+        Trace.asyncTraceForTrackBegin(
+                Trace.TRACE_TAG_NETWORK, "RIL", RILUtils.requestToString(rr.mRequest), rr.mSerial);
+
         synchronized (mRequestList) {
             mRequestList.append(rr.mSerial, rr);
         }
@@ -351,7 +355,10 @@ public class RadioConfig extends Handler {
         RILRequest rr;
         synchronized (mRequestList) {
             rr = mRequestList.get(serial);
+
             if (rr != null) {
+                Trace.asyncTraceForTrackEnd(
+                        Trace.TRACE_TAG_NETWORK, "RIL", "" /* unused */, rr.mSerial);
                 mRequestList.remove(serial);
             }
         }
@@ -454,6 +461,8 @@ public class RadioConfig extends Handler {
      */
     public void setPreferredDataModem(int modemId, Message result) {
         RadioConfigProxy proxy = getRadioConfigProxy(null);
+        if (proxy.isEmpty()) return;
+
         if (!isSetPreferredDataCommandSupported()) {
             if (result != null) {
                 AsyncResult.forMessage(result, null,
@@ -480,7 +489,9 @@ public class RadioConfig extends Handler {
      */
     public void getPhoneCapability(Message result) {
         RadioConfigProxy proxy = getRadioConfigProxy(null);
-        if (proxy.isEmpty() || proxy.getVersion().less(RADIO_CONFIG_HAL_VERSION_1_1)) {
+        if (proxy.isEmpty()) return;
+
+        if (proxy.getVersion().less(RADIO_CONFIG_HAL_VERSION_1_1)) {
             if (result != null) {
                 AsyncResult.forMessage(result, null,
                         CommandException.fromRilErrno(REQUEST_NOT_SUPPORTED));
@@ -537,7 +548,9 @@ public class RadioConfig extends Handler {
      */
     public void setNumOfLiveModems(int numOfLiveModems, Message result) {
         RadioConfigProxy proxy = getRadioConfigProxy(result);
-        if (proxy.isEmpty() || proxy.getVersion().less(RADIO_CONFIG_HAL_VERSION_1_1)) {
+        if (proxy.isEmpty()) return;
+
+        if (proxy.getVersion().less(RADIO_CONFIG_HAL_VERSION_1_1)) {
             if (result != null) {
                 AsyncResult.forMessage(
                         result, null, CommandException.fromRilErrno(REQUEST_NOT_SUPPORTED));
@@ -581,7 +594,9 @@ public class RadioConfig extends Handler {
      */
     public void getHalDeviceCapabilities(Message result) {
         RadioConfigProxy proxy = getRadioConfigProxy(Message.obtain(result));
-        if (proxy.isEmpty() || proxy.getVersion().less(RADIO_CONFIG_HAL_VERSION_1_3)) {
+        if (proxy.isEmpty()) return;
+
+        if (proxy.getVersion().less(RADIO_CONFIG_HAL_VERSION_1_3)) {
             if (result != null) {
                 if (DBG) {
                     logd("RIL_REQUEST_GET_HAL_DEVICE_CAPABILITIES > REQUEST_NOT_SUPPORTED");

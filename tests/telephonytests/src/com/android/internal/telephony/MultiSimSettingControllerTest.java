@@ -464,6 +464,35 @@ public class MultiSimSettingControllerTest extends TelephonyTest {
 
     @Test
     @SmallTest
+    public void testSimpleDsdsInSuW() {
+        // at first boot default is not set
+        doReturn(-1).when(mSubControllerMock).getDefaultDataSubId();
+
+        doReturn(true).when(mPhoneMock1).isUserDataEnabled();
+        doReturn(true).when(mPhoneMock2).isUserDataEnabled();
+        // setting DEVICE_PROVISIONED as 0 to indicate SuW is running.
+        Settings.Global.putInt(mContext.getContentResolver(),
+                Settings.Global.DEVICE_PROVISIONED, 0);
+        // After initialization, sub 2 should have mobile data off.
+        mMultiSimSettingControllerUT.notifyAllSubscriptionLoaded();
+        mMultiSimSettingControllerUT.notifyCarrierConfigChanged(0, 1);
+        mMultiSimSettingControllerUT.notifyCarrierConfigChanged(1, 2);
+        processAllMessages();
+        verify(mDataEnabledSettingsMock1).setDataEnabled(
+                TelephonyManager.DATA_ENABLED_REASON_USER, false);
+        verify(mDataEnabledSettingsMock2).setDataEnabled(
+                TelephonyManager.DATA_ENABLED_REASON_USER, false);
+
+        // as a result of the above calls, update new values to be returned
+        doReturn(false).when(mPhoneMock1).isUserDataEnabled();
+        doReturn(false).when(mPhoneMock2).isUserDataEnabled();
+
+        // No user selection needed, no intent should be sent.
+        verify(mContext, never()).sendBroadcast(any());
+    }
+
+    @Test
+    @SmallTest
     public void testDsdsGrouping() {
         doReturn(2).when(mSubControllerMock).getDefaultDataSubId();
         doReturn(false).when(mPhoneMock1).isUserDataEnabled();
@@ -879,5 +908,35 @@ public class MultiSimSettingControllerTest extends TelephonyTest {
         processAllMessages();
         verify(mSubControllerMock).getActiveSubInfoCountMax();
         verify(mSubControllerMock).setDefaultDataSubId(anyInt());
+    }
+
+    @Test
+    public void onSubscriptionGroupChanged_hasActiveSubNotPartOfGroup() {
+        // sub1 and sub2 are active subs already
+        // Create a subscription group with only sub2
+        doReturn(mGroupUuid1).when(mSubControllerMock).getGroupUuid(2);
+        doReturn(Arrays.asList(mSubInfo2)).when(mSubControllerMock)
+                .getSubscriptionsInGroup(any(), anyString(), nullable(String.class));
+        mMultiSimSettingControllerUT.notifySubscriptionGroupChanged(mGroupUuid1);
+        processAllMessages();
+        // Default data is not modified as sub1 is active sub not part of this groupUuid
+        verify(mSubControllerMock, never()).setDefaultDataSubId(anyInt());
+    }
+
+    @Test
+    public void onSubscriptionGroupChanged_allActiveSubArePartOfGroup() throws Exception {
+        doReturn(3).when(mSubControllerMock).getDefaultDataSubId();
+        // Create subscription grouping of subs 1 and 2.
+        replaceInstance(SubscriptionInfo.class, "mGroupUUID", mSubInfo1, mGroupUuid1);
+        doReturn(mGroupUuid1).when(mSubControllerMock).getGroupUuid(1);
+        doReturn(mGroupUuid1).when(mSubControllerMock).getGroupUuid(2);
+        GlobalSettingsHelper.setBoolean(mContext, Settings.Global.MOBILE_DATA, 1, true);
+        doReturn(Arrays.asList(mSubInfo1, mSubInfo2)).when(mSubControllerMock)
+                .getSubscriptionsInGroup(any(), anyString(), nullable(String.class));
+
+        mMultiSimSettingControllerUT.notifySubscriptionGroupChanged(mGroupUuid1);
+        processAllMessages();
+        // Default data is set to sub1
+        verify(mSubControllerMock).setDefaultDataSubId(1);
     }
 }
